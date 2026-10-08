@@ -1,0 +1,60 @@
+name: Plant adoption watcher
+
+on:
+  # Each run polls for ~5h45m. Runs queue up behind each other (see
+  # concurrency), so coverage is continuous even though GitHub's cron is late.
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "watch = normal; test = send a test email + push and exit"
+        type: choice
+        options: [watch, test]
+        default: test
+
+permissions:
+  actions: write    # lets the bot disable itself once it has alerted
+  contents: read
+
+concurrency:
+  group: plant-watcher-${{ github.event.inputs.mode || 'watch' }}
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore state
+        if: ${{ (github.event.inputs.mode || 'watch') == 'watch' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: watcher-state-${{ github.run_id }}
+          restore-keys: watcher-state-
+
+      - name: Watch
+        id: watch
+        run: python3 -u watch.py
+        env:
+          MODE: ${{ github.event.inputs.mode || 'watch' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+
+      - name: Save state
+        if: ${{ always() && (github.event.inputs.mode || 'watch') == 'watch' }}
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: watcher-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Switch off after alerting / after 2 Dec
+        if: ${{ steps.watch.outputs.stop == 'true' }}
+        run: gh workflow disable watch.yml --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
